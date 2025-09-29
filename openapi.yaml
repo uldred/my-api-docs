@@ -26,12 +26,11 @@ info:
 
     
     Так же важно понимать, что инвойс у нас "живет" до окончания TTL **(по умолчанию 1 час)** или же до первого успеха (если внутри инвойса появляется платеж со статусом **Оплачен**). То есть, если TTL инвойса не подошел к концу и инвойс не находится в статусе **Ошибка** или **Просрочен**, такой инвойс еще можно оплатить, даже несмотря на то, что по нему уже было несколько неуспешных попыток оплаты (несколько платежей в статусе **Ошибка**). Это сделано в целях того, чтобы плательщик, произведя первую неуспешную попытку оплаты, мог попытаться оплатить заказ еще раз в рамках этого же инвойса.
-
-
   version: v27.08.2025
 servers:
   - url: https://pay1time.com
     description: production сервер
+
 components:
   securitySchemes:
     ApiKeyAuth:
@@ -39,8 +38,24 @@ components:
       in: header
       name: Authorization
       description: Используйте формат "Token:{ваш_токен}"
+  schemas:
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: boolean
+          example: false
+        data:
+          type: string
+          example: ""
+        errors:
+          type: array
+          items:
+            type: string
+
 security:
   - ApiKeyAuth: []
+
 paths:
   /api/payQRcode:
     post:
@@ -53,7 +68,6 @@ paths:
         Так же при работе через нашу форму оплаты, необходимо брать соответствующую вашему решению ссылку на форму оплаты из ответа на данный запрос. А именно из массива **payment_url** находящийся в объекте **invoice**. 
         
         Если же у вас подключено несколько решений, например, ECOM + СБП, то можете использовать универсальную форму оплаты из параметра **url**, где клиент самостоятельно может выбрать удобный ему способ.
-      
       parameters:
         - name: visitorId
           in: query
@@ -62,7 +76,6 @@ paths:
           schema:
             type: string
             example: "1331123"
-      
       requestBody:
         required: true
         content:
@@ -148,7 +161,6 @@ paths:
                 name: "Название проекта"
                 url: "https://мой-сайт.ru"
               currency: "RUB"
-      
       responses:
         '201':
           description: |
@@ -261,9 +273,13 @@ paths:
                         description: Массив URL наших платежных форм с уже предвыбранным способом оплаты
                         items:
                           type: object
-                          additionalProperties:
-                            type: string
-                            format: uri
+                          properties:
+                            ECOM:
+                              type: string
+                              format: uri
+                            SBP:
+                              type: string
+                              format: uri
                         example: 
                           - {"ECOM": "https://sbp-pay-form.pay1time.com/card/0c323d19-a008-620b-1219-14740d9d68c5"}
                           - {"SBP": "https://sbp-pay-form.pay1time.com/sbp/0c323d19-a008-620b-1219-14740d9d68c5"}
@@ -282,35 +298,19 @@ paths:
                         format: uri
                         description: Страница неуспешной обработки, на которую перенаправляется плательщик с формы оплаты, при получении статуса платежа "FAILED". Работает только если вы работаете по нашей форме оплаты.
                         example: "http://fail_url.com"
-                  
-        
         '400':
           description: Ошибка создания инвойса/платежа (неверные параметры, лимиты и т.д.). В данном случае платеж не создается внутри инвойса.
           content:
             application/json:
               schema:
-                type: object
-                properties:
-                  status:
-                    type: boolean
-                    example: false
-                  data:
-                    type: string
-                    example: ""
-                  errors:
-                    type: array
-                    description: |
-                      Массив ошибок. Возможные значения:
-                      - "Лимиты сумм по проекту от {мин сумма по проекту} до {макс сумма по проекту}"
-                      - "Пожалуйста, проверьте информацию по платежу guid {гуид ранее созданного платежа}"
-                    items:
-                      type: string
-                    example:
-                      - "Пожалуйста, проверьте информацию по платежу guid {гуид ранее созданного платежа}"
-        
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                status: false
+                data: ""
+                errors:
+                  - "Пожалуйста, проверьте информацию по платежу guid {гуид ранее созданного платежа}"
         '403':
           description: Доступ с вашего IP-адреса запрещен (не в белом списке)
-        
         '500':
           description: Внутренняя ошибка сервера
 
@@ -320,7 +320,6 @@ paths:
         - Проверка статуса инвойса
       summary: "Проверка статуса инвойса"
       description: Проверяет статус инвойса по его внутреннему **id** pay1time или по параметру **order_id** мерчанта.
-      
       parameters:
         - name: order_id
           in: query
@@ -329,7 +328,6 @@ paths:
           schema:
             type: string
             example: "1122334455"
-        
         - name: id
           in: query
           required: false
@@ -337,7 +335,6 @@ paths:
           schema:
             type: string
             example: "22770077"
-      
       responses:
         '200':
           description: |
@@ -387,7 +384,6 @@ paths:
                     description: Массив платежей, созданных в рамках инвойса (временно не реализовано, массив будет пустой)
                     items: {}
                     example: []
-        
         '400':
           description: Ошибка валидации параметров запроса
           content:
@@ -397,15 +393,12 @@ paths:
                 properties:
                   status:
                     type: boolean
-                    description: ""
                     example: false
                   errors:
                     type: object
-                    description: ""
                     properties:
                       title:
                         type: string
-                        description: ""
                         example: "Validation error"
                       text:
                         type: string
@@ -423,7 +416,6 @@ paths:
         - Инициация СБП возврата
       summary: "Инициация возврата средств по СБП-платежу"
       description: Запрос на полный или частичный возврат средств по успешному платежу. Обращаем внимание, что **amount** в данном случае указывается в уже рублях, в отличии от запроса на создание инвойса и платежа СБП. Если возврат подразумевает сумму с копейками, то копеечную часть стоит указывать через точку.
-      
       requestBody:
         required: true
         content:
@@ -456,7 +448,6 @@ paths:
               amount: 500.50
               order_id: "order-12345"
               currency: "RUB"
-      
       responses:
         '201':
           description: |
@@ -482,7 +473,6 @@ paths:
                     description: Статус возврата
                     example: "STATUS_INIT"
                     enum: [STATUS_INIT, STATUS_REFUND, STATUS_ERROR]
-        
         '400':
           description: Ошибка запроса на возврат (неверная сумма, платеж не найден и т.д.)
           content:
@@ -507,7 +497,6 @@ paths:
       description: |
         Проверяет статус возврата по его ID **ИЛИ** список всех возвратов по ID платежа.
         Используйте один из query-параметров.
-      
       parameters:
         - name: refund_id
           in: query
@@ -516,7 +505,6 @@ paths:
           schema:
             type: string
             example: "77991"
-        
         - name: payment_id
           in: query
           required: false
@@ -524,7 +512,6 @@ paths:
           schema:
             type: string
             example: "123456"
-      
       responses:
         '200':
           description: |
@@ -592,7 +579,6 @@ paths:
                               example: "2019-08-06T12:00:10"
                             message:
                               type: string
-        
         '400':
           description: Не указаны параметры или другие ошибки.
 
@@ -602,7 +588,6 @@ paths:
         - Информация по мерчанту
       summary: "Проверка баланса мерчанта"
       description: Возвращает информацию о балансе по проекту мерчанта.
-      
       responses:
         '200':
           description: Информация по балансу получена.
@@ -646,7 +631,6 @@ paths:
                           type: number
                           description: Средства в холде
                           example: 0
-        
         '400':
           description: Ошибка получения баланса.
           content:
@@ -682,7 +666,6 @@ paths:
         | Оплачен | `SUCCESS` | Оплата прошла успешно |
         | Ошибка | `FAILED` | Оплата прошла неуспешно |
         | Ошибка Логики | `UNDEFINED` | Необрабатываемая ошибка |
-      
       requestBody:
         required: true
         content:
@@ -758,7 +741,6 @@ paths:
               sign: "001111111adadadada"
               description: ""
               invoice_id: "7746aee9-e832-777e-54fd-b6997e9a0675"
-      
       responses:
         '200':
           description: Ожидаем от вас 200 статус код, в противном случае будет направлено всего 5 повторных попыток доставки с разницей в одну минуту.
@@ -770,6 +752,5 @@ paths:
                   status:
                     type: string
                     example: "OK"
-        
         '400':
           description: Неверный формат уведомления или ошибка проверки подписи
