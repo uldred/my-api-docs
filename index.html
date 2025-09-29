@@ -2,14 +2,25 @@
 <html>
   <head>
     <title>API Documentation</title>
-    <meta charset="utf-8"/>
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <link rel="stylesheet" type="text/css" href="https://unpkg.com/swagger-ui-dist@3/swagger-ui.css" />
     <style>
-      body { margin: 0; padding: 0; }
+      body { margin: 0; }
+      #swagger-ui { padding: 20px; }
     </style>
   </head>
   <body>
-    <redoc spec-url='openapi.yaml'></redoc>
-    <script src="https://cdn.redoc.ly/redoc/latest/bundles/redoc.standalone.js"></script>
+    <div id="swagger-ui"></div>
+    <script src="https://unpkg.com/swagger-ui-dist@3/swagger-ui-bundle.js"></script>
+    <script>
+      SwaggerUIBundle({
+        url: 'openapi.yaml',
+        dom_id: '#swagger-ui',
+        presets: [
+          SwaggerUIBundle.presets.apis,
+          SwaggerUIBundle.presets.versions
+        ],
+        layout: "BaseLayout"
+      });
+    </script>
   </body>
 </html>
