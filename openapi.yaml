@@ -1,0 +1,775 @@
+openapi: 3.0.3
+info:
+  title: API мерчанта для СБП-платежей (pay1time.com)
+  description: |
+    ## Важно! В API для интеграции с системой быстрых платежей (СБП), все запросы необходимо отправлять строго по протоколу HTTP/1.1.
+    
+    Для всех запросов обязателен заголовок `Authorization: Token: {your_token}`.
+    
+    На сервисе работает **whitelist**. Запросы с не доверенных адресов будут блокироваться и
+    отбиваться со статус-кодом **403 Forbidden**. Для корректного взаимодействия просим отправить ваши ip- адреса сотрудникам поддержки для занесения их в пул доверенных адресов.
+
+    <br>
+    ## Используемая терминология:
+    * **Инвойс** – ордер на оплату, формируемый клиентом через запрос **POST /api/payQRcode**;
+    * **Платеж** – попытка оплаты инвойса. Создается внутри инвойса путем выполнения запроса **POST /api/payQRcode?visitorId=** или же при факте перехода на форму оплаты;
+    * **Коллбек** – функция нотификации, выполняемая при финализации операций. В нашем случае это обычный **POST** запрос, отправляемый нашим сервисом на указанный мерчантом callback_url;
+    * **НСПК** – Национальная Система Платежных Карт. Платежный и клиринговый центр сервиса СБП.
+    
+    <br>
+    **Важно** понимать, что мы разделяем понятия между **инвойсом и платежом**. Платеж создается непосредственно внутри инвойса и не может существовать как отдельная сущность. Статусы инвойсов и платежей разные, более подробно о них будет описано ниже. 
+    
+    Возможно два способа интеграции по сервису СБП-платежи:
+    1) **H2H – host-to-host** решение. Способ, при котором вызывается **POST /api/payQRcode** где в ответе выдается непосредственно сами qrLink и qrImage. Данную qr-ссылку или qr-код мерчант самостоятельно передает/показывает плательщику;
+    
+    2) **Работа через платежную форму.** Необходимо вызвать метод создания СБП инвойса **POST /api/payQRcode?visitorId=** где из ответа берется ссылка на нашу форму из параметра **url**, куда в дальнейшем перенаправляется плательщик. При каждом переходе на форму оплаты, генерируется новый QR и создается платеж. В последующем остается ожидать статус инвойса через коллбек или же можно опросить статус инвойса методом GET /api/payments
+
+    
+    Так же важно понимать, что инвойс у нас "живет" до окончания TTL **(по умолчанию 1 час)** или же до первого успеха (если внутри инвойса появляется платеж со статусом **Оплачен**). То есть, если TTL инвойса не подошел к концу и инвойс не находится в статусе **Ошибка** или **Просрочен**, такой инвойс еще можно оплатить, даже несмотря на то, что по нему уже было несколько неуспешных попыток оплаты (несколько платежей в статусе **Ошибка**). Это сделано в целях того, чтобы плательщик, произведя первую неуспешную попытку оплаты, мог попытаться оплатить заказ еще раз в рамках этого же инвойса.
+
+
+  version: v27.08.2025
+servers:
+  - url: https://pay1time.com
+    description: production сервер
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: Используйте формат "Token:{ваш_токен}"
+security:
+  - ApiKeyAuth: []
+paths:
+  /api/payQRcode:
+    post:
+      tags:
+        - Создание инвойса и СБП платежа
+      summary: "Создание инвойса и платежа с QR-кодом за один запрос"
+      description: |
+        Создает инвойс и сразу инициирует СБП-платеж внутри него, возвращая QR-ссылку **(qrLink)** и изображение QR-кода **(qrImage)** в формате base64. Обращаем внимание, что значение **amount** необходимо указывать в копейках.
+        
+        Так же при работе через нашу форму оплаты, необходимо брать соответствующую вашему решению ссылку на форму оплаты из ответа на данный запрос. А именно из массива **payment_url** находящийся в объекте **invoice**. 
+        
+        Если же у вас подключено несколько решений, например, ECOM + СБП, то можете использовать универсальную форму оплаты из параметра **url**, где клиент самостоятельно может выбрать удобный ему способ.
+      
+      parameters:
+        - name: visitorId
+          in: query
+          required: true
+          description: Уникальный идентификатор плательщика. Данный идентификатор должен быть статичным для каждого плательщика.
+          schema:
+            type: string
+            example: "1331123"
+      
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - order_id
+                - amount
+                - payer_name
+                - payer_phone
+                - payer_email
+                - merchant
+                - currency
+              properties:
+                order_id:
+                  type: string
+                  description: Уникальный номер заказа в системе мерчанта
+                  example: "order-12345"
+                amount:
+                  type: integer
+                  description: Сумма инвойса в копейках
+                  example: 100000
+                  minimum: 1
+                payer_name:
+                  type: string
+                  description: Имя плательщика
+                  example: "Иван Иванов"
+                payer_phone:
+                  type: string
+                  description: Номер телефона плательщика в международном формате. Если номер зарегистрирован в Сбербанке, на него придет пуш-уведомление.
+                  example: "+79001112233"
+                payer_email:
+                  type: string
+                  format: email
+                  description: Email плательщика
+                  example: "client@example.com"
+                callback_url:
+                  type: string
+                  format: uri
+                  description: URL для получения коллбэков о статусе платежа
+                  example: "https://my-site.ru/callback"
+                return_url:
+                  type: string
+                  format: uri
+                  description: URL для перенаправления после успешной оплаты (при использовании платежной формы pay1time)
+                  example: "https://my-site.ru/success"
+                fail_url:
+                  type: string
+                  format: uri
+                  description: URL для перенаправления после неуспешной оплаты (при использовании платежной формы pay1time)
+                  example: "https://my-site.ru/fail"
+                merchant:
+                  type: object
+                  required:
+                    - name
+                    - url
+                  properties:
+                    name:
+                      type: string
+                      description: Наименование ТСП. Параметр обязателен, но может быть пустым
+                      example: "Название проекта"
+                    url:
+                      type: string
+                      format: uri
+                      description: URL ТСП
+                      example: "https://мой-сайт.ru"
+                currency:
+                  type: string
+                  description: Валюта платежа
+                  example: "RUB"
+                  default: "RUB"
+            example:
+              order_id: "order-12345"
+              amount: 100000
+              payer_name: "Иван Иванов"
+              payer_phone: "+79001112233"
+              payer_email: "client@example.com"
+              callback_url: "https://my-site.ru/callback"
+              return_url: "https://my-site.ru/success"
+              fail_url: "https://my-site.ru/fail"
+              merchant:
+                name: "Название проекта"
+                url: "https://мой-сайт.ru"
+              currency: "RUB"
+      
+      responses:
+        '201':
+          description: |
+            Инвойс и платеж созданы, возвращены данные QR-кода.
+            
+            **Статусная модель платежа СБП:**
+            
+            | Статус | Значение параметра "status" | Описание |
+            |--------|-----|-----------|
+            | Создан | `CREATED` | В Системе создан СБП платеж по данному инвойсу |
+            | В Обработке | `INITIALIZED` | Отправлен сгенерированный динамический код |
+            | Оплачен | `SUCCESS` | Оплата прошла успешно |
+            | Ошибка | `FAILED` | Оплата прошла неуспешно |
+            | Ошибка Логики | `UNDEFINED` | Необрабатываемая ошибка |
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  guid:
+                    type: string
+                    description: Уникальный гуид инвойса
+                    example: "0c323d19-a008-620b-1219-14740d9d68c5"
+                  payment_id:
+                    type: string
+                    description: Номер платежа внутри системы Процессинга
+                    example: "004952132"
+                  status:
+                    type: string
+                    description: Статус платежа. Значения параметра status платежа указаны в таблице выше
+                    example: "INITIALIZED"
+                    enum: [CREATED, INITIALIZED, SUCCESS, FAILED, UNDEFINED]
+                  qrLink:
+                    type: string
+                    format: uri
+                    description: Ссылка на оплату через QR СБП
+                    example: "https://qr.nspk.ru/AD20001LV93VRDEQ81SAOKBLDVOOQD43?type=02&bank=100000000251&sum=1000&cur=RUB&crc=516E"
+                  qrImage:
+                    type: string
+                    description: Хеш изображения QR-кода в формате base64
+                    example: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAcIAAAHCAQMAAABG1lsGAAAABlBMVEX///8AAABVwtN+AAAACXBIWXMAAA7EAAAOxAGVKw4bAAACT0lEQVR4nO3cQXKDMAyFYWW6YJkjcBSORo7GUThClll0omJbshXSzkBa0s3/Vk3Ex05jg5yKvJxRQ27LF2edazF/ebcP53ilXpBI5GZZr+sWmcqzDLm0ylmv9e8RiUTukafccJ9ZehtOubx06N3Ktyx7KyKRyH+Q3tlT6+jTUvLORiKRv5Yp/VIatMR0t6WzkUjk30t5Kk+SVs8qP9TXTw8SidwjQ5oc7KZ5l9qW1hYkEnm8/CFDLubOPqnawropSCRyldqfqQk93p+atrD3vH7q0rhpmOHNi0Qi3yLTyLBsYTsrh/ibVA9vN78gkci9sk0s4kTRpvbeuumm/qIViURuk+It+Gmf4lww7FI7k/669IJEIg+Xo4a0zp7sPrZLLXI9sUAikVukHQR1l+ItmOPr581Ks0jtbCQSeawc21NkyyS+euaPzxOLiwgSidws8xIpeZH0I2phC/uYXjXsUpFI5Ftk6+xyeGZOLMRu2lmpX3c2EonkB/kfL1V9VH5LpLwAAAAASUVORK5CYII="
+                  returnUrl:
+                    type: string
+                    format: uri
+                    description: Страница успешной обработки, на которую перенаправляется плательщик с формы оплаты, при получении статуса платежа "SUCCESS". Работает только если вы работаете по нашей форме оплаты.
+                    example: "https://my-site.ru/success"
+                  failUrl:
+                    type: string
+                    format: uri
+                    description: Страница неуспешной обработки, на которую перенаправляется плательщик с формы оплаты, при получении статуса платежа "FAILED". Работает только если вы работаете по нашей форме оплаты.
+                    example: "https://my-site.ru/fail"
+                  errorDescription:
+                    type: string
+                    description: |
+                      Описание ошибки (в случае, если платеж сразу получает статус "FAILED")  Возможные значения:
+                      - Ошибка проведения платежа. Обратитесь к менеджеру или попробуйте позже.
+                      - Ошибка. Указан некорректный url для ТСП
+                    example: ""
+                  invoice:
+                    type: object
+                    description: Объект с информацией по инвойсу
+                    properties:
+                      id:
+                        type: string
+                        description: Номер инвойса внутри системы pay1time
+                        example: "26042090"
+                      order_id:
+                        type: string
+                        description: Уникальный номер в системе мерчанта
+                        example: "20230615-sbp-01"
+                      amount:
+                        type: integer
+                        description: Сумма инвойса в копейках
+                        example: 1000
+                      status:
+                        type: string
+                        description: Статус инвойса. Возможные значения параметра status инвойса и их описания указаны в описании запроса проверки статуса инвойса
+                        example: "STATUS_INIT"
+                        enum: [STATUS_INIT, STATUS_PAID, STATUS_EXPIRED, STATUS_ERROR]
+                      created_at:
+                        type: string
+                        format: date-time
+                        description: Дата создания инвойса. Указывается в формате YYYY-MM-DDThh:mm:ss
+                        example: "2025-08-01T18:30:00"
+                      merchant:
+                        type: string
+                        description: Уникальный uuid проекта (не информативен для мерчантов)
+                        example: "c9e2d69c-5c94-11f0-a875-0050568df313"
+                      merchant_name:
+                        type: string
+                        description: Название мерчанта в системе
+                        example: "Название проекта"
+                      currency:
+                        type: string
+                        description: Валюта
+                        example: "RUB"
+                      template_data:
+                        type: object
+                        description: Временные данные по инвойсу (не информативен для мерчантов)
+                        example: {}
+                      payment_methods:
+                        type: array
+                        description: Массив, содержащий значения возможных и доступных методов оплаты инвойса
+                        items:
+                          type: string
+                          enum: [ECOM, SBP, SBERPAY]
+                        example: ["ECOM", "SBP"]
+                      payment_url:
+                        type: array
+                        description: Массив URL наших платежных форм с уже предвыбранным способом оплаты
+                        items:
+                          type: object
+                          additionalProperties:
+                            type: string
+                            format: uri
+                        example: 
+                          - {"ECOM": "https://sbp-pay-form.pay1time.com/card/0c323d19-a008-620b-1219-14740d9d68c5"}
+                          - {"SBP": "https://sbp-pay-form.pay1time.com/sbp/0c323d19-a008-620b-1219-14740d9d68c5"}
+                      url:
+                        type: string
+                        format: uri
+                        description: "Универсальная форма оплаты, где клиент сам выбирает метод оплаты. P.S. Параметр необходим только тем, у кого подключены 2 или более метода оплаты: ECOM, SBP, SBERPAY. Если же у вас доступен только один метод оплаты по проекту, то необходимо предоставлять клиенту соответсвующий url из массива payment_url"
+                        example: "https://sbp-pay-form.pay1time.com/sbp/0c323d19-a008-620b-1219-14740d9d68c5"
+                      return_url:
+                        type: string
+                        format: uri
+                        description: Страница успешной обработки, на которую перенаправляется плательщик с формы оплаты, при получении статуса платежа "SUCCESS". Работает только если вы работаете по нашей форме оплаты.
+                        example: "https://return_url.com"
+                      fail_url:
+                        type: string
+                        format: uri
+                        description: Страница неуспешной обработки, на которую перенаправляется плательщик с формы оплаты, при получении статуса платежа "FAILED". Работает только если вы работаете по нашей форме оплаты.
+                        example: "http://fail_url.com"
+                  
+        
+        '400':
+          description: Ошибка создания инвойса/платежа (неверные параметры, лимиты и т.д.). В данном случае платеж не создается внутри инвойса.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: boolean
+                    example: false
+                  data:
+                    type: string
+                    example: ""
+                  errors:
+                    type: array
+                    description: |
+                      Массив ошибок. Возможные значения:
+                      - "Лимиты сумм по проекту от {мин сумма по проекту} до {макс сумма по проекту}"
+                      - "Пожалуйста, проверьте информацию по платежу guid {гуид ранее созданного платежа}"
+                    items:
+                      type: string
+                    example:
+                      - "Пожалуйста, проверьте информацию по платежу guid {гуид ранее созданного платежа}"
+        
+        '403':
+          description: Доступ с вашего IP-адреса запрещен (не в белом списке)
+        
+        '500':
+          description: Внутренняя ошибка сервера
+
+  /api/payments:
+    get:
+      tags:
+        - Проверка статуса инвойса
+      summary: "Проверка статуса инвойса"
+      description: Проверяет статус инвойса по его внутреннему **id** pay1time или по параметру **order_id** мерчанта.
+      
+      parameters:
+        - name: order_id
+          in: query
+          required: false
+          description: Номер заказа в системе мерчанта для поиска.
+          schema:
+            type: string
+            example: "1122334455"
+        
+        - name: id
+          in: query
+          required: false
+          description: ID инвойса в системе pay1time.com для поиска. Возвращается в ответе на запрос POST /api/payQRcode в объекте **invoice** как параметр **id**
+          schema:
+            type: string
+            example: "22770077"
+      
+      responses:
+        '200':
+          description: |
+            Статус инвойса получен.
+            
+            **Статусная модель инвойса СБП:**
+            
+            | Статус | Код | Описание |
+            |--------|-----|-----------|
+            | Создан | `STATUS_INIT` | Создан (начальный статус) |
+            | Оплачен | `STATUS_PAID` | Оплачен (финальный статус) |
+            | Просрочен | `STATUS_EXPIRED` | Просрочен по TTL Инвойса и при этом не было попыток оплаты (финальный статус) |
+            | Ошибка | `STATUS_ERROR` | Попытки оплаты завершены с ошибкой и инвойс завершился по TTL |
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    description: Номер инвойса внутри системы pay1time
+                    example: "22770077"
+                  order_id:
+                    type: string
+                    description: Уникальный номер в системе мерчанта
+                    example: "1122334455"
+                  amount:
+                    type: integer
+                    description: Сумма инвойса в копейках
+                    example: 121000
+                  status:
+                    type: string
+                    description: Статус инвойса. Значения параметра status Возможные значения status описаны в методе создания инвойса POST /api/payQRcode
+                    example: "STATUS_PAID"
+                    enum: [STATUS_INIT, STATUS_PAID, STATUS_EXPIRED, STATUS_ERROR]
+                  date:
+                    type: string
+                    description: Дата создания инвойса. Указывается в формате YYYY-MM-DDThh:mm:ss
+                    format: date-time
+                    example: "2022-01-19T10:06:31"
+                  fee:
+                    type: integer
+                    description: Комиссия (временно не реализовано и будет равно 0)
+                    example: 0
+                  pay:
+                    type: array
+                    description: Массив платежей, созданных в рамках инвойса (временно не реализовано, массив будет пустой)
+                    items: {}
+                    example: []
+        
+        '400':
+          description: Ошибка валидации параметров запроса
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: boolean
+                    description: ""
+                    example: false
+                  errors:
+                    type: object
+                    description: ""
+                    properties:
+                      title:
+                        type: string
+                        description: ""
+                        example: "Validation error"
+                      text:
+                        type: string
+                        description: "Описание ошибки"
+                        example: "Некорректный id или orderId"
+              example:
+                status: false
+                errors:
+                  title: "Validation error"
+                  text: "Некорректный id или orderId"
+
+  /api/refundSBP:
+    post:
+      tags:
+        - Инициация СБП возврата
+      summary: "Инициация возврата средств по СБП-платежу"
+      description: Запрос на полный или частичный возврат средств по успешному платежу. Обращаем внимание, что **amount** в данном случае указывается в уже рублях, в отличии от запроса на создание инвойса и платежа СБП. Если возврат подразумевает сумму с копейками, то копеечную часть стоит указывать через точку.
+      
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - payment_id
+                - amount
+              properties:
+                payment_id:
+                  type: string
+                  description: ID платежа, полученный в коллбэке или в запросе на статус инвойса
+                  example: "001111111"
+                amount:
+                  type: number
+                  description: Сумма возврата в рублях (с копейками через точку)
+                  example: 500.50
+                order_id:
+                  type: string
+                  description: Номер заказа в системе мерчанта
+                  example: "order-12345"
+                currency:
+                  type: string
+                  description: Валюта возврата
+                  example: "RUB"
+                  default: "RUB"
+            example:
+              payment_id: "001111111"
+              amount: 500.50
+              order_id: "order-12345"
+              currency: "RUB"
+      
+      responses:
+        '201':
+          description: |
+            Запрос на возврат принят и создан.
+            
+            **Статусная модель возврата СБП:**
+            
+            | Статус | Значение параметра "status" | Описание |
+            |--------|-----|-----------|
+            | Создан | `STATUS_INIT` | Возврат создан |
+            | Выплачен | `STATUS_REFUND` | Возврат выплачен |
+            | Ошибка | `STATUS_ERROR` | Возврат завершен с ошибкой |
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  refund_id:
+                    type: string
+                    example: "77991"
+                  status:
+                    type: string
+                    description: Статус возврата
+                    example: "STATUS_INIT"
+                    enum: [STATUS_INIT, STATUS_REFUND, STATUS_ERROR]
+        
+        '400':
+          description: Ошибка запроса на возврат (неверная сумма, платеж не найден и т.д.)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: boolean
+                    example: false
+                  data:
+                    type: string
+                    example: ""
+                  errors:
+                    type: string
+                    example: "Платеж не найден"
+
+    get:
+      tags:
+        - Проверка статуса возврата СБП
+      summary: "Проверка статуса возврата(-ов)"
+      description: |
+        Проверяет статус возврата по его ID **ИЛИ** список всех возвратов по ID платежа.
+        Используйте один из query-параметров.
+      
+      parameters:
+        - name: refund_id
+          in: query
+          required: false
+          description: ID возврата в системе pay1time. Возвращается в ответе на запрос **POST /api/refundSBP**
+          schema:
+            type: string
+            example: "77991"
+        
+        - name: payment_id
+          in: query
+          required: false
+          description: ID платежа в системе pay1time (для поиска возвратов).
+          schema:
+            type: string
+            example: "123456"
+      
+      responses:
+        '200':
+          description: |
+            Информация о возврате(-ах) получена.
+            
+            **Статусная модель возврата СБП:**
+            
+            | Статус | Значение параметра "status" | Описание |
+            |--------|-----|-----------|
+            | Создан | `STATUS_INIT` | Возврат создан |
+            | Выплачен | `STATUS_REFUND` | Возврат выплачен |
+            | Ошибка | `STATUS_ERROR` | Возврат завершен с ошибкой |
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - type: object
+                    properties:
+                      payment_id:
+                        type: string
+                        example: "123456"
+                      amount:
+                        type: number
+                        example: 100
+                      refund_id:
+                        type: string
+                        example: "77991"
+                      status:
+                        type: string
+                        description: Статус возврата
+                        example: "STATUS_REFUND"
+                        enum: [STATUS_INIT, STATUS_REFUND, STATUS_ERROR]
+                      date:
+                        type: string
+                        format: date-time
+                        example: "2019-08-06T12:00:10"
+                      message:
+                        type: string
+                        description: Описание ошибки (если статус STATUS_ERROR)
+                  - type: object
+                    properties:
+                      payment_id:
+                        type: string
+                        example: "123456"
+                      amount:
+                        type: number
+                        example: 100
+                      refunds:
+                        type: array
+                        description: Массив возвратов по платежу (могут быть частичные возвраты).
+                        items:
+                          type: object
+                          properties:
+                            refund_id:
+                              type: string
+                              example: "77991"
+                            status:
+                              type: string
+                              description: Статус возврата
+                              example: "STATUS_REFUND"
+                              enum: [STATUS_INIT, STATUS_REFUND, STATUS_ERROR]
+                            date:
+                              type: string
+                              format: date-time
+                              example: "2019-08-06T12:00:10"
+                            message:
+                              type: string
+        
+        '400':
+          description: Не указаны параметры или другие ошибки.
+
+  /api/wallets:
+    get:
+      tags:
+        - Информация по мерчанту
+      summary: "Проверка баланса мерчанта"
+      description: Возвращает информацию о балансе по проекту мерчанта.
+      
+      responses:
+        '200':
+          description: Информация по балансу получена.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  result:
+                    type: boolean
+                    example: true
+                  balance:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        merchantId:
+                          type: string
+                          description: Уникальный идентификатор проекта в системе pay1time
+                          example: "000000001"
+                        currency:
+                          type: string
+                          example: "RUB"
+                        totalBalance:
+                          type: number
+                          description: Весь баланс
+                          example: 1234
+                        availableBalance:
+                          type: number
+                          description: Доступный к выводу баланс
+                          example: 1234
+                        transferInProcessing:
+                          type: number
+                          description: Баланс операций, находящихся в обработке
+                          example: 0
+                        ReservedBalance:
+                          type: number
+                          description: Зарезервированные средства
+                          example: 0
+                        HoldingFunds:
+                          type: number
+                          description: Средства в холде
+                          example: 0
+        
+        '400':
+          description: Ошибка получения баланса.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: boolean
+                    example: false
+                  data:
+                    type: string
+                    example: ""
+                  errors:
+                    type: string
+                    example: "Ошибка получения баланса"
+
+  /callbacks:
+    post:
+      tags:
+        - Коллбек
+      summary: "Получение уведомлений о статусе платежей"
+      description: |
+        Сервис отправляет POST запрос на указанный в запросе создания `callback_url` результирующую информацию при смене статуса платежа на SUCCESS или FAILED.
+        
+        
+        **Статусная модель платежа СБП:**
+        
+        | Статус | Значение параметра "status"| Описание |
+        |--------|-----|-----------|
+        | Создан | `CREATED` | В Системе создан СБП платеж по данному инвойсу |
+        | В Обработке | `INITIALIZED` | Отправлен сгенерированный динамический код |
+        | Оплачен | `SUCCESS` | Оплата прошла успешно |
+        | Ошибка | `FAILED` | Оплата прошла неуспешно |
+        | Ошибка Логики | `UNDEFINED` | Необрабатываемая ошибка |
+      
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                payment_method:
+                  type: string
+                  description: Выбранный способ оплаты инвойса
+                  example: "sbp"
+                qrlink:
+                  type: string
+                  format: uri
+                  example: "https://qr.nspk.ru/AAAAAAAAAAAAAAAAVVVVVVVVVVVV?type=02&bank=100000000&sum=10000&cur=RUB&crc=C932"
+                status_time:
+                  type: string
+                  format: date-time
+                  example: "2022-01-19T10:06:31"
+                created_at:
+                  type: string
+                  format: date-time
+                  example: "2022-01-19T10:06:31"
+                status:
+                  type: string
+                  description: Финальный статус платежа см. Статусная модель платежа СБП
+                  example: "SUCCESS"
+                  enum: [SUCCESS, FAILED]
+                amount:
+                  type: integer
+                  description: В копейках
+                  example: 10000
+                payment_type:
+                  type: string
+                  example: "sbp"
+                guid:
+                  type: string
+                  format: uuid
+                  description: GUID платежа
+                  example: "7746aee9-e832-777e-54fd-b6997e9a0675"
+                order_id:
+                  type: string
+                  description: Номер заказа мерчанта
+                  example: "853b5dc7-eb35-41cb-987c-863a795003ea"
+                payment_id:
+                  type: string
+                  description: ID платежа в системе pay1time (для возвратов)
+                  example: "001111111"
+                sign:
+                  type: string
+                  description: Подпись уведомления. Рассчитывается как хэшmd5 строки конкатенации(order_id + amount + token)
+                  example: "001111111adadadada"
+                description:
+                  type: string
+                  description: Описание ошибки (если статус FAILED)
+                  example: ""
+                invoice_id:
+                  type: string
+                  format: uuid
+                  description: GUID инвойса
+                  example: "7746aee9-e832-777e-54fd-b6997e9a0675"
+            example:
+              payment_method: "sbp"
+              qrlink: "https://qr.nspk.ru/AAAAAAAAAAAAAAAAVVVVVVVVVVVV?type=02&bank=100000000&sum=10000&cur=RUB&crc=C932"
+              status_time: null
+              created_at: "2022-01-19T10:06:31"
+              status: "SUCCESS"
+              amount: 10000
+              payment_type: "sbp"
+              guid: "7746aee9-e832-777e-54fd-b6997e9a0675"
+              order_id: "853b5dc7-eb35-41cb-987c-863a795003ea"
+              payment_id: "001111111"
+              sign: "001111111adadadada"
+              description: ""
+              invoice_id: "7746aee9-e832-777e-54fd-b6997e9a0675"
+      
+      responses:
+        '200':
+          description: Ожидаем от вас 200 статус код, в противном случае будет направлено всего 5 повторных попыток доставки с разницей в одну минуту.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "OK"
+        
+        '400':
+          description: Неверный формат уведомления или ошибка проверки подписи
